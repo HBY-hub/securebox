@@ -14,32 +14,41 @@ permissions:
   contents: write
 
 jobs:
-  # 手动触发时：创建标签并推送，随后的 tag push 会自动完成构建与发布
+  # 确定版本号；手动触发时通过 API 创建标签（GITHUB_TOKEN 创建的标签不会触发 push 工作流，
+  # 因此构建与发布在本运行内直接完成）
   prepare:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: 创建并推送标签
+      - name: 确定版本号
+        id: ver
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
-          case "$VERSION" in
-            v*) ;;
-            *) VERSION="v$VERSION" ;;
-          esac
-          if git rev-parse "$VERSION" >/dev/null 2>&1; then
-            echo "标签 $VERSION 已存在"
-            exit 1
+          set -e
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            V="$INPUT_VERSION"
+            case "$V" in v*) ;; *) V="v$V" ;; esac
+            if gh api "repos/$REPO/git/ref/tags/$V" >/dev/null 2>&1; then
+              echo "标签 $V 已存在，请选择其他版本号"
+              exit 1
+            fi
+            gh api "repos/$REPO/git/refs" -f "ref=refs/tags/$V" -f "sha=$SHA"
+            echo "已创建标签 $V"
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "Release $VERSION"
-          git push origin "refs/tags/$VERSION"
 
   build:
-    if: github.event_name == 'push'
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -70,8 +79,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'push'
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -86,5 +94,6 @@ jobs:
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare.outputs.version }}
           files: dist/*
           generate_release_notes: true
